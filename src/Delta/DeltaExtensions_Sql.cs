@@ -28,6 +28,16 @@ public static partial class DeltaExtensions
             return ExecutePostgres;
         }
 
+        if (name == "MySqlConnection")
+        {
+            var timestamp = await Execute(connection, transaction, ExecuteMySql, cancel);
+            if (!string.IsNullOrWhiteSpace(timestamp))
+            {
+                return ExecuteMySql;
+            }
+            return ExecuteSqlTimeStampMariaDb;
+        }
+
         throw new($"Unsupported type {name}");
     }
 
@@ -85,6 +95,24 @@ public static partial class DeltaExtensions
         return (string) reader[0];
     }
 
+    internal static async Task<string> ExecuteMySql(DbCommand command, Cancel cancel = default)
+    {
+        command.CommandText =
+            """
+            SHOW MASTER STATUS;
+            """;
+
+        using var reader = await command.ExecuteReaderAsync(cancel);
+        if (await reader.ReadAsync(cancel))
+        {
+            var file = reader.GetString(0);   // Binlog file name
+            var position = reader.GetInt64(1);  // Binlog position
+            return $"{file}-{position}";
+        }
+
+        return "No-binlog"; // If binary logging is disabled
+    }
+
     internal static async Task<string> ExecuteSqlTimeStamp(DbCommand command, Cancel cancel = default)
     {
         command.CommandText =
@@ -98,6 +126,23 @@ public static partial class DeltaExtensions
               select cast(@timeStamp as varchar) + '-' + cast(@changeTracking as varchar)
             """;
         return (string) (await command.ExecuteScalarAsync(cancel))!;
+    }
+
+    internal static async Task<string> ExecuteSqlTimeStampMariaDb(DbCommand command, Cancel cancel = default)
+    {
+        command.CommandText =
+            """
+            -- Get the current binary log file and position
+            SELECT CONCAT(file, '-', position)
+            FROM (
+                SELECT variable_value AS file FROM information_schema.global_status WHERE variable_name = 'Binlog_Enabled'
+            ) AS binlog_file,
+            (
+                SELECT variable_value AS position FROM information_schema.global_status WHERE variable_name = 'Binlog_Position'
+            ) AS binlog_position;
+            """;
+
+        return (string)(await command.ExecuteScalarAsync(cancel))!;
     }
 
     static async Task<bool> HasViewServerState(DbCommand command, Cancel cancel = default)
